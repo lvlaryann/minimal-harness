@@ -19,6 +19,7 @@ class Agent:
         client: OpenRouterClient | None = None,
         max_turns: int = 12,
         session: Session | None = None,
+        observer=None,
     ) -> None:
         """Initialize an agent session.
 
@@ -30,12 +31,17 @@ class Agent:
             Optional model client.
         max_turns : int
             Maximum model turns.
+        session : Session or None
+            Optional persisted session.
+        observer : callable or None
+            Optional callback run after each tool call.
 
         Returns
         -------
         None
             This initializer configures the agent.
         """
+        self.observer = observer
         self.client = client or OpenRouterClient()
         self.tools = ToolRegistry(root)
         self.max_turns = max_turns
@@ -220,9 +226,12 @@ class Agent:
             Tool result message.
         """
         function = call["function"]
+        arguments: dict[str, Any] = {}
         try:
             arguments = json.loads(function.get("arguments", "{}"))
             content = self.tools.execute(function["name"], arguments)
         except (ToolError, json.JSONDecodeError, KeyError) as exc:
             content = json.dumps({"error": str(exc)})
+        if self.observer is not None:
+            self.observer(function["name"], arguments, content)
         return {"role": "tool", "tool_call_id": call["id"], "content": content}

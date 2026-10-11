@@ -115,6 +115,67 @@ class AgentTests(unittest.TestCase):
         return [item["function"]["name"] for item in registry.schema()]
 
 
+class InstallGuardTests(unittest.TestCase):
+    """Verify package-install commands prompt for approval."""
+
+    def test_install_command_detected(self) -> None:
+        """Common install commands are recognized.
+
+        Returns
+        -------
+        None
+            Assertions pass when both forms are detected.
+        """
+        registry = ToolRegistry(".")
+        self.assertTrue(registry._is_install("pip install reportlab"))
+        self.assertTrue(registry._is_install("npm install axios"))
+
+    def test_plain_command_not_detected(self) -> None:
+        """Non-install commands are not flagged.
+
+        Returns
+        -------
+        None
+            Assertions pass when the command is ignored.
+        """
+        registry = ToolRegistry(".")
+        self.assertFalse(registry._is_install("python script.py"))
+        self.assertFalse(registry._is_install("ls -la"))
+
+    def test_install_requires_approval(self) -> None:
+        """An install command asks the questioner first.
+
+        Returns
+        -------
+        None
+            Assertions pass when approval is requested.
+        """
+        asked = []
+
+        def questioner(question, options):
+            asked.append((question, options))
+            return "No, don't install"
+
+        registry = ToolRegistry(".", questioner=questioner)
+        with self.assertRaises(ToolError):
+            registry.bash("pip install reportlab")
+        self.assertEqual(len(asked), 1)
+        self.assertIn("install", asked[0][0].lower())
+        self.assertIn("Yes, install it", asked[0][1])
+
+    def test_install_approval_missing_raises(self) -> None:
+        """Without a questioner the install is rejected.
+
+        Returns
+        -------
+        None
+            Assertions pass when a ToolError is raised.
+        """
+        registry = ToolRegistry(".")
+        with self.assertRaises(ToolError):
+            registry.bash("pip install reportlab")
+
+
 class ToolCallClient:
     """Return one write call followed by final text."""
 
