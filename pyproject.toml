@@ -14,13 +14,19 @@ dev = ["black>=26.5", "playwright>=1.50"]
 
 [project.scripts]
 harness-search = "meta_harness.cli:main"
+harness-gui = "gui.app:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["meta_harness*", "gui*"]
+
 [tool.setuptools.package-data]
 meta_harness = ["prompts/*.md"]
+gui = ["assets/*.png"]
 
 [tool.black]
 line-length = 79

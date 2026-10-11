@@ -1,6 +1,7 @@
 """Built-in tools for the Minimal Harness agent runtime."""
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -215,8 +216,56 @@ class ToolRegistry:
         dict[str, Any]
             Exit code and bounded output.
         """
+        if self._is_install(command):
+            self._require_install_ok()
         result = self._run_command(command, timeout)
         return self._command_result(result)
+
+    def _is_install(self, command: str) -> bool:
+        """Detect package-install commands.
+
+        Parameters
+        ----------
+        command : str
+            Shell command to inspect.
+
+        Returns
+        -------
+        bool
+            Whether the command installs packages.
+        """
+        text = command.lower()
+        return bool(
+            re.search(
+                r"\b(pip|pip3|npm|apt|apt-get|brew|cargo|go)\s+(install)\b",
+                text,
+            )
+        )
+
+    def _require_install_ok(self) -> None:
+        """Ask the user to approve a package install.
+
+        Returns
+        -------
+        None
+            Execution continues only after approval.
+
+        Raises
+        ------
+        ToolError
+            When no questioner exists or approval is denied.
+        """
+        if self.questioner is None:
+            raise ToolError("Installing software needs your approval first.")
+        answer = self.questioner(
+            "I need to download and install a tool for this. " "Is that okay?",
+            ["Yes, install it", "No, don't install"],
+        )
+        if not answer.lower().startswith("yes"):
+            raise ToolError(
+                "Install declined. Do not install software without "
+                "approval."
+            )
 
     def _run_command(
         self, command: str, timeout: int
