@@ -7,7 +7,7 @@ name = "minimal-harness"
 version = "0.1.0"
 description = "Minimal Harness with adversarial review and Docker gates"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["PySide6"]
 
 [project.optional-dependencies]
 dev = ["black>=26.5", "playwright>=1.50"]

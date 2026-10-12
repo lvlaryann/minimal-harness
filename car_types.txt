@@ -1,0 +1,21 @@
+List of 10 Car Types
+
+1. Sedan - A passenger car with a four-door configuration and a separate trunk compartment.
+
+2. SUV (Sport Utility Vehicle) - A vehicle combining elements of road-going passenger cars with features from off-road vehicles.
+
+3. Coupe - A passenger car with a fixed roof and typically two doors, sloping rear roofline.
+
+4. Hatchback - A car with a rear door that swings upward to provide access to a cargo area.
+
+5. Convertible - A car with a roof that can be retracted or removed for open-air driving.
+
+6. Wagon (Station Wagon) - A car with an extended roofline and rear cargo area, accessible via a rear door.
+
+7. Minivan (MPV) - A multi-purpose vehicle with a boxy shape, sliding side doors, and flexible seating.
+
+8. Pickup Truck - A light-duty truck with an enclosed cab and an open cargo bed.
+
+9. Roadster - A two-seater open-top car, typically with a folding soft top and no fixed side windows.
+
+10. Limousine - A long, luxury vehicle driven by a chauffeur, often used for special occasions.

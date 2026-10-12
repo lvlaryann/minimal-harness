@@ -9,6 +9,7 @@ from PySide6.QtGui import (
     QColor,
     QPixmap,
     QTextBlockFormat,
+    QTextCharFormat,
     QTextCursor,
     QTextDocument,
     QTextDocumentFragment,
@@ -193,6 +194,7 @@ class ChatPanel(QWidget):
         self._context = context
         self._show_tools = show_tools
         self._notes_included = False
+        self._last_label: str | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(250)
         self._timer.timeout.connect(self._animate)
@@ -334,6 +336,7 @@ class ChatPanel(QWidget):
         self._agent.session = session
         self._agent.messages = self._agent._initial_messages(session)
         self._log.clear()
+        self._last_label = None
         for message in session.messages:
             self._render_message(message)
 
@@ -374,6 +377,8 @@ class ChatPanel(QWidget):
         """
         user = label == "you"
         tool = label == "tool"
+        gap = self._last_label is not None and self._last_label != label
+        self._last_label = label
         cursor = self._log.textCursor()
         cursor.movePosition(QTextCursor.End)
         if not self._log.document().isEmpty():
@@ -383,13 +388,18 @@ class ChatPanel(QWidget):
         doc.setMarkdown(text)
         cursor.insertFragment(QTextDocumentFragment(doc))
         end = cursor.position()
-        self._apply_bubble(start, end, user, tool)
+        self._apply_bubble(start, end, user, tool, gap)
         self._log.setTextCursor(cursor)
         bar = self._log.verticalScrollBar()
         bar.setValue(bar.maximum())
 
     def _apply_bubble(
-        self, start: int, end: int, user: bool, tool: bool = False
+        self,
+        start: int,
+        end: int,
+        user: bool,
+        tool: bool = False,
+        gap: bool = True,
     ) -> None:
         """Style inserted blocks as an aligned bubble.
 
@@ -403,6 +413,8 @@ class ChatPanel(QWidget):
             Whether the bubble is the user's.
         tool : bool
             Whether the bubble is a tool step.
+        gap : bool
+            Whether an extra top margin separates this bubble.
 
         Returns
         -------
@@ -412,34 +424,42 @@ class ChatPanel(QWidget):
         fmt = QTextBlockFormat()
         if tool:
             fmt.setAlignment(Qt.AlignLeft)
-            fmt.setBackground(QColor("#EFEFEF"))
-            fmt.setRightMargin(self._bubble_margin())
+            fmt.setLeftMargin(self._bubble_margin())
         else:
             fmt.setAlignment(Qt.AlignRight if user else Qt.AlignLeft)
-            fmt.setBackground(QColor("#D2DBD6" if user else "#D6E0E6"))
             if user:
-                fmt.setLeftMargin(self._bubble_margin())
-            else:
                 fmt.setRightMargin(self._bubble_margin())
+            else:
+                fmt.setLeftMargin(self._bubble_margin())
+        ch = QTextCharFormat()
+        ch.setBackground(
+            QColor("#EFEFEF" if tool else ("#D2DBD6" if user else "#D6E0E6"))
+        )
         block = self._log.document().findBlock(start)
         first = QTextBlockFormat(fmt)
-        first.setTopMargin(6)
+        first.setTopMargin(6 if gap else 0)
         count = 0
         while block.isValid() and block.position() < end:
             cursor = QTextCursor(block)
             cursor.setBlockFormat(first if count == 0 else fmt)
+            sel = QTextCursor(block)
+            sel.setPosition(block.position())
+            sel.setPosition(
+                block.position() + block.length() - 1, QTextCursor.KeepAnchor
+            )
+            sel.mergeCharFormat(ch)
             block = block.next()
             count += 1
 
     def _bubble_margin(self) -> int:
-        """Compute the inward bubble offset.
+        """Return the text inset from the viewport edge.
 
         Returns
         -------
         int
-            Pull-in margin in pixels.
+            Fixed inset in pixels.
         """
-        return max(30, int(self._log.viewport().width() * 0.4))
+        return 14
 
     def on_started(self) -> None:
         """Begin the moving thinking indicator.

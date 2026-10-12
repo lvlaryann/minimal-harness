@@ -6,6 +6,48 @@ Minimal Harness is a Python control plane inspired by **Meta-Harness: End-to-End
 
 This repository is an independent modification. It is not the paper authors' artifact and does not reproduce their benchmark numbers.
 
+## Installation
+
+Requires Python 3.11 or newer. The same commands work on Windows, macOS, and Linux. Everything installs from `pyproject.toml`, including the PySide6 desktop GUI.
+
+```bash
+python -m venv .venv
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]" flake8
+```
+
+Activate the virtual environment in every new shell. On macOS and Linux: `source .venv/bin/activate`. On Windows cmd: `.venv\Scripts\activate`. On Windows PowerShell: `.venv\Scripts\Activate.ps1`.
+
+The `dev` extra adds formatter and test tooling; plain `python -m pip install -e .` gives just the app.
+
+Browser-backed tools (`browser_open`, `browser_assert`, `browser_screenshot`) need the Playwright runtime, separate from the Python package:
+
+```bash
+python -m playwright install chromium
+```
+
+Docker is optional. It is only used by the `--optimize` gates; the gates can run without it via `--no-docker`. On Windows and macOS use Docker Desktop; on Linux install your distro's `docker` package.
+
+OpenRouter needs a key before the first run. See [OpenRouter Setup](#openrouter-setup).
+
+## Running the App
+
+Entry points are identical on Windows, macOS, and Linux:
+
+```bash
+harness-gui                            # desktop GUI
+python -m meta_harness.cli "Question"  # terminal answer mode
+python -m meta_harness.cli --tui "Inspect this workspace"  # full-screen TUI
+```
+
+`harness-gui` opens a PySide6 window with a command panel and an ideas panel, and keeps a session store on disk. The GUI works on any desktop with a display; you do not need a terminal once it is running.
+
+Per-platform notes:
+
+- **Windows:** install Python from [python.org](https://python.org) and tick "Add python.exe to PATH". If `python` is missing from PATH, use `py -3 -m venv .venv` and `py -3 -m pip install` in its place. Activate the venv with the cmd or PowerShell line above, then use the same commands.
+- **macOS:** `python3` ships with the OS but can be older than 3.11. For this project, install a current 3.x from [python.org](https://python.org) or via Homebrew and build the venv with that interpreter.
+- **Linux:** if you created the venv outside a distro-managed `python3`, install `python3-venv` (Debian/Ubuntu) or your distro's equivalent. The TUI needs a real terminal, and the GUI needs an X11 or Wayland session.
+
 ## What The Paper Says
 
 The paper describes a system that “repeatedly proposes, evaluates, and logs new harnesses.” Its central engineering decision is to let an agent inspect a filesystem containing prior candidate source code, evaluation scores, and raw execution traces.
@@ -160,6 +202,16 @@ mkdir -p e2e-workspaces/new-site
 python3 -m meta_harness.cli --workspace e2e-workspaces/new-site "Build a complete responsive website here. Create index.html, styles.css, and app.js, then use bash to verify them."
 ```
 
+### Desktop GUI
+
+`harness-gui` wraps the interactive tool loop in a PySide6 window. It is the same agent, tools, ask prompts, and sessions as the terminal, with a desktop frontend.
+
+- A sidebar lists sessions and builds stored under `runs/sessions/`. `+ New Session` and `+ New Build` start new ones; a right-click menu renames or deletes.
+- The Command panel works like the terminal loop.
+- The Ideas panel runs its own conversation and always sees a live workspace snapshot (git status, diff, file tree), the end of the active Command conversation, and your saved notes. The notes toggle includes or excludes them.
+
+Questions surface as dialogs, next-step suggestions render as buttons, and agent work runs off the UI thread. Conversations persist as JSONL, so chats survive restarts.
+
 ### Optimize Mode
 
 The original modified search loop is explicit with `--optimize`:
@@ -193,6 +245,12 @@ python3 -m meta_harness.cli --list-models --free-only
 ```
 
 The optimizer currently produces proposal artifacts and is separate from the interactive coding loop. The tool loop can create files and run commands. The optimizer's Docker gate now includes stronger container restrictions, but its task score remains a placeholder unless you replace the command with a domain evaluator.
+
+Every optimize iteration writes a `runs/iteration-*/trajectory.jsonl` with the stage, truncated prompts, and responses. Print them all in plain text:
+
+```bash
+python3 -m meta_harness.cli --show-run runs
+```
 
 The interactive agent can invoke `evaluate_app` for deterministic checks of `index.html`, `styles.css`, `app.js`, HTML structure, and Node JavaScript syntax. It can invoke `browser_assert` to require visible page text before accepting a browser check.
 
@@ -293,7 +351,7 @@ These controls reduce risk but are not a complete hostile-code sandbox. Producti
 ## Testing
 
 ```bash
-cd /Users/kevinthomas/Documents/minimal-harness
+cd ~/Documents/minimal-harness
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]" flake8
@@ -335,6 +393,17 @@ Free-model routing can still be rate-limited. The client retries transient failu
 The model client has a 30-second socket timeout and a 120-second hard request alarm. The web client has a 15-second request timeout. Progress messages identify whether the delay is in web retrieval or OpenRouter.
 
 Stop a running process with `Ctrl-C`.
+
+### GUI aborts with `Settings schema 'org.gnome.settings-daemon.plugins.xsettings' does not contain a key named 'antialiasing'` on Linux
+
+Some GNOME installs ship a schema missing the key Qt's gtk3 theme plugin reads. Qt still loads the plugin if it is merely renamed in place, so move it out of the plugins directory:
+
+```bash
+mkdir -p ~/qt-plugins-backup
+mv .venv/lib/python*/site-packages/PySide6/Qt/plugins/platformthemes/libqgtk3.so ~/qt-plugins-backup/
+```
+
+Restart the GUI. To re-enable the gtk3 theme, move the file back under the same path.
 
 ## Layout
 
