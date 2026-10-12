@@ -75,6 +75,15 @@ QPushButton:hover {{
 QPushButton:pressed {{
     background-color: #b4ab95;
 }}
+QPushButton:checked {{
+    background-color: {DOMINANT};
+    color: {NEUTRAL};
+    border: 1px solid {DOMINANT};
+}}
+QPushButton:checked:hover {{
+    background-color: {SECONDARY};
+    color: {DOMINANT};
+}}
 QPushButton:disabled {{
     background-color: {NEUTRAL};
     color: {SECONDARY};

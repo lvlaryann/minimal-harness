@@ -249,6 +249,30 @@ class ChatPanel(QWidget):
         self._input.submitted.connect(self._submit)
         self._pending: QuestionBridge | None = None
 
+    def set_explanations(self, enabled: bool) -> None:
+        """Set or clear tooltips on the panel's own widgets.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether tooltips should be visible.
+
+        Returns
+        -------
+        None
+            Input, send, and notes tooltips reflect the toggle.
+        """
+        tips = {
+            self._input: "Type your prompt. Enter sends; Shift-Enter is a "
+            "new line.",
+            self._send: "Send the typed prompt to the agent.",
+            self._log: "Conversation and tool activity appear here.",
+        }
+        if self._notes is not None:
+            tips[self._notes] = "Include this session's saved notes."
+        for widget, text in tips.items():
+            widget.setToolTip(text if enabled else "")
+
     def _on_notes(self, state: int) -> None:
         """Toggle whether notes join the context.
 
@@ -670,6 +694,7 @@ class MainWindow(QMainWindow):
         self.resize(1440, 640)
         self._refresh_sidebar()
         self._activate(self._store.list()[0])
+        self._on_show_explanations(self._settings.get("show_explanations"))
 
     def _make_agent(self) -> Agent:
         """Build an agent for one panel.
@@ -774,7 +799,8 @@ class MainWindow(QMainWindow):
         sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(220)
         box = QVBoxLayout(sidebar)
-        box.addWidget(QLabel("<b>Sessions</b>", sidebar))
+        self._sessions_heading = QLabel("<b>Sessions</b>", sidebar)
+        box.addWidget(self._sessions_heading)
         self._session_list = QListWidget(sidebar)
         self._session_list.itemClicked.connect(self._select)
         self._session_list.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -782,19 +808,20 @@ class MainWindow(QMainWindow):
             self._menu_session
         )
         box.addWidget(self._session_list)
-        session_button = QPushButton("+ New Session", sidebar)
-        session_button.clicked.connect(self._new_session)
-        box.addWidget(session_button)
+        self._new_session_button = QPushButton("+ New Session", sidebar)
+        self._new_session_button.clicked.connect(self._new_session)
+        box.addWidget(self._new_session_button)
         box.addSpacing(12)
-        box.addWidget(QLabel("<b>Builds</b>", sidebar))
+        self._builds_heading = QLabel("<b>Builds</b>", sidebar)
+        box.addWidget(self._builds_heading)
         self._build_list = QListWidget(sidebar)
         self._build_list.itemClicked.connect(self._select)
         self._build_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self._build_list.customContextMenuRequested.connect(self._menu_build)
         box.addWidget(self._build_list)
-        build_button = QPushButton("+ New Build", sidebar)
-        build_button.clicked.connect(self._new_build)
-        box.addWidget(build_button)
+        self._new_build_button = QPushButton("+ New Build", sidebar)
+        self._new_build_button.clicked.connect(self._new_build)
+        box.addWidget(self._new_build_button)
         return sidebar
 
     def _refresh_sidebar(self) -> None:
@@ -1075,6 +1102,13 @@ class MainWindow(QMainWindow):
         self._toggle = QPushButton("Open Ideas", self)
         self._toggle.clicked.connect(self.toggle_ideas)
         bar.addWidget(self._toggle)
+        self._help = QPushButton("?", self)
+        self._help.setCheckable(True)
+        self._help.setToolTip("Show or hide hover explanations.")
+        self._help.setFixedSize(32, 28)
+        self._help.setChecked(self._settings.get("show_explanations"))
+        self._help.toggled.connect(self._on_show_explanations)
+        bar.addWidget(self._help)
         return bar
 
     def _on_show_commands(self, checked: bool) -> None:
@@ -1108,6 +1142,66 @@ class MainWindow(QMainWindow):
         self._settings.set("show_tools", checked)
         self._command_panel._show_tools = checked
         self._ideas_panel._show_tools = checked
+
+    def _on_show_explanations(self, checked: bool) -> None:
+        """Persist and apply the hover explanation toggle.
+
+        Parameters
+        ----------
+        checked : bool
+            Whether explanation tooltips are visible.
+
+        Returns
+        -------
+        None
+            Tooltips are added or cleared across panels.
+        """
+        self._settings.set("show_explanations", checked)
+        self._apply_explanations(checked)
+        self._command_panel.set_explanations(checked)
+        self._ideas_panel.set_explanations(checked)
+
+    def _apply_explanations(self, enabled: bool) -> None:
+        """Set or clear tooltips on window-level widgets.
+
+        Parameters
+        ----------
+        enabled : bool
+            Whether tooltips should be visible.
+
+        Returns
+        -------
+        None
+            Widget tooltips reflect the toggle.
+        """
+        tips = self._window_tips()
+        for widget, text in tips.items():
+            widget.setToolTip(text if enabled else "")
+
+    def _window_tips(self) -> dict:
+        """Map window widgets to their help text.
+
+        Returns
+        -------
+        dict
+            Widget-to-explanation entries.
+        """
+        return {
+            self._show_commands: "Show each tool command in the log.",
+            self._show_tools: "Show tool activity entries in the log.",
+            self._toggle: "Open or close the Ideas panel.",
+            self._help: "Show or hide hover explanations.",
+            self._sessions_heading: (
+                "Saved conversations. Click to open, right-click to rename "
+                "or delete."
+            ),
+            self._build_list: (
+                "Saved project builds. Click to open, right-click to rename "
+                "or delete."
+            ),
+            self._new_session_button: "Start a new conversation.",
+            self._new_build_button: "Start a new build project.",
+        }
 
     def toggle_ideas(self) -> None:
         """Toggle the ideas panel visibility.
