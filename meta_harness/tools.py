@@ -5,9 +5,11 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
+from xml.sax.saxutils import escape
 
 from .web_search import WebSearchClient
 from .browser import BrowserClient
+from .deliverables import blueprint_file, render_deliverable
 from .evaluator import AppEvaluator
 from .provider import ProviderCatalog
 
@@ -34,6 +36,60 @@ TOOL_SCHEMAS = {
     },
     "suggest": {"options": {"type": "array", "items": {"type": "string"}}},
     "list_models": {"free_only": {"type": "boolean"}},
+    "make_pdf": {
+        "filename": {"type": "string"},
+        "title": {"type": "string"},
+        "text": {"type": "string"},
+    },
+    "make_deliverable": {
+        "title": {"type": "string"},
+        "sections": {"type": "array", "items": {"type": "object"}},
+        "summary": {"type": "array", "items": {"type": "string"}},
+        "style": {"type": "object"},
+        "filename": {"type": "string"},
+        "subtitle": {"type": "string"},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "sources": {"type": "array", "items": {"type": "object"}},
+        "next_steps": {"type": "array", "items": {"type": "string"}},
+    },
+    "make_blueprint": {
+        "title": {"type": "string"},
+        "width_ft": {"type": "number"},
+        "depth_ft": {"type": "number"},
+        "wall_height_ft": {"type": "number"},
+        "pitch": {"type": "string"},
+        "door": {"type": "object"},
+        "vents": {"type": "array", "items": {"type": "object"}},
+        "views": {"type": "array", "items": {"type": "string"}},
+        "style": {"type": "object"},
+        "filename": {"type": "string"},
+    },
+}
+
+TOOL_DESCRIPTIONS = {
+    "ask": (
+        "Ask the user exactly one question. Provide 2 to 5 short options; "
+        "the interface also lets the user type a custom answer. Never ask "
+        "more than one question in a single call."
+    ),
+    "suggest": "Offer short optional next steps as clickable buttons.",
+    "make_pdf": "Create a PDF in the output folder from a title and text.",
+    "make_deliverable": (
+        "Render a polished HTML report, plan, guide, or proposal. Sections "
+        "are objects with heading plus optional body, bullets, table "
+        "({columns, rows, caption}), figure ({kind: blueprint, blueprint: "
+        "{...}, caption}), callout ({tone, text}), checklist, code, or "
+        "raw_html. Style supports theme (sage|slate|warm|mono), density "
+        "(comfortable|compact), font (sans|serif|mono), columns (1|2), "
+        "page_size (letter|a4), accent (hex), and custom_css. Use this "
+        "instead of hand-writing HTML."
+    ),
+    "make_blueprint": (
+        "Draw a scaled blueprint with plan, front, and side views. Give "
+        "width_ft, depth_ft, wall_height_ft, pitch (like 4:12), optional "
+        "door ({wall, width_in, height_in}), vents, and views. Writes SVG "
+        "to the output folder."
+    ),
 }
 
 
@@ -52,14 +108,35 @@ def _tool_schema(name: str, properties: dict[str, Any]) -> dict[str, Any]:
     dict[str, Any]
         Tool schema.
     """
+    description = TOOL_DESCRIPTIONS.get(name, f"Minimal Harness {name} tool")
     return {
         "type": "function",
         "function": {
             "name": name,
-            "description": f"Minimal Harness {name} tool",
+            "description": description,
             "parameters": {"type": "object", "properties": properties},
         },
     }
+
+
+def _inside(target: Path, root: Path | None) -> bool:
+    """Return whether a path sits inside a root.
+
+    Parameters
+    ----------
+    target : pathlib.Path
+        Resolved candidate path.
+    root : pathlib.Path or None
+        Allowed root.
+
+    Returns
+    -------
+    bool
+        ``True`` when the target equals or lives under the root.
+    """
+    if root is None:
+        return False
+    return target == root or root in target.parents
 
 
 class ToolError(RuntimeError):
@@ -73,6 +150,7 @@ class ToolRegistry:
         self,
         root: Path | str = ".",
         questioner: Callable[[str, list[str]], str] | None = None,
+        outputs: Path | str | None = None,
     ) -> None:
         """Initialize tools rooted at one workspace.
 
@@ -84,6 +162,8 @@ class ToolRegistry:
             Optional callback that presents a question with options and
             returns the user's chosen answer. When absent, the ``ask``
             tool is not advertised.
+        outputs : pathlib.Path or str or None
+            Optional second root for delivered files.
 
         Returns
         -------
@@ -92,6 +172,7 @@ class ToolRegistry:
         """
         self.root = Path(root).resolve()
         self.questioner = questioner
+        self.outputs = Path(outputs).resolve() if outputs else None
         self.suggestions: list[str] = []
         self.tools = self._tool_map()
 
@@ -412,6 +493,194 @@ class ToolRegistry:
         catalog = ProviderCatalog()
         return catalog.free_models() if free_only else catalog.list_models()
 
+    def make_pdf(self, filename: str, title: str, text: str) -> dict[str, str]:
+        """Create a simple PDF in the output folder.
+
+        Parameters
+        ----------
+        filename : str
+            Destination filename, usually ending in ``.pdf``.
+        title : str
+            Heading shown at the top of the document.
+        text : str
+            Plain text body, one paragraph per line.
+
+        Returns
+        -------
+        dict[str, str]
+            Absolute path of the written PDF.
+        """
+        target = self._output_path(filename)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self._write_pdf(target, title, text)
+        return {"path": str(target)}
+
+    def _output_path(self, filename: str) -> Path:
+        """Resolve a destination under the output folder.
+
+        Parameters
+        ----------
+        filename : str
+            Requested filename.
+
+        Returns
+        -------
+        pathlib.Path
+            Confined destination path.
+        """
+        base = self.outputs or self.root
+        target = (base / filename).resolve()
+        if _inside(target, base):
+            return target
+        raise ToolError("path escapes output folder")
+
+    def _write_pdf(self, target: Path, title: str, text: str) -> None:
+        """Render plain text into a PDF file.
+
+        Parameters
+        ----------
+        target : pathlib.Path
+            Destination PDF path.
+        title : str
+            Document heading.
+        text : str
+            Plain text body.
+
+        Returns
+        -------
+        None
+            The PDF is written to disk.
+        """
+        try:
+            from reportlab.lib.pagesizes import letter
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.platypus import (
+                Paragraph,
+                SimpleDocTemplate,
+                Spacer,
+            )
+        except ImportError as exc:
+            raise ToolError("PDF support needs reportlab installed.") from exc
+        styles = getSampleStyleSheet()
+        story = [Paragraph(escape(title), styles["Title"]), Spacer(1, 12)]
+        for line in text.splitlines() or [""]:
+            story.append(
+                Paragraph(escape(line) or "&nbsp;", styles["BodyText"])
+            )
+        SimpleDocTemplate(str(target), pagesize=letter).build(story)
+
+    def make_deliverable(
+        self,
+        title: str,
+        sections: list[dict[str, Any]],
+        summary: list[str] | str | None = None,
+        style: dict[str, Any] | None = None,
+        filename: str | None = None,
+        subtitle: str = "",
+        assumptions: list[str] | None = None,
+        sources: list[dict[str, str]] | None = None,
+        next_steps: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Render a polished HTML deliverable.
+
+        Parameters
+        ----------
+        title : str
+            Document title.
+        sections : list[dict[str, Any]]
+            Ordered content sections.
+        summary : list[str] or str or None
+            At-a-glance points.
+        style : dict[str, Any] or None
+            Theme, density, font, columns, and other overrides.
+        filename : str or None
+            Optional output name.
+        subtitle : str
+            Optional subtitle.
+        assumptions : list[str] or None
+            Stated assumptions.
+        sources : list[dict[str, str]] or None
+            Source records with title and url.
+        next_steps : list[str] or None
+            Concrete follow-up actions.
+
+        Returns
+        -------
+        dict[str, str]
+            Absolute path of the written HTML file.
+        """
+        spec = {
+            "title": title,
+            "subtitle": subtitle,
+            "sections": sections,
+            "summary": summary,
+            "style": style,
+            "filename": filename,
+            "assumptions": assumptions,
+            "sources": sources,
+            "next_steps": next_steps,
+        }
+        target = render_deliverable(spec, self.outputs or self.root)
+        return {"path": str(target)}
+
+    def make_blueprint(
+        self,
+        title: str = "Blueprint",
+        width_ft: float = 10,
+        depth_ft: float = 12,
+        wall_height_ft: float = 6,
+        pitch: str = "4:12",
+        door: dict[str, Any] | None = None,
+        vents: list[dict[str, Any]] | None = None,
+        views: list[str] | None = None,
+        style: dict[str, Any] | None = None,
+        filename: str | None = None,
+    ) -> dict[str, str]:
+        """Draw a scaled blueprint as SVG.
+
+        Parameters
+        ----------
+        title : str
+            Drawing title.
+        width_ft : float
+            Gable width in feet.
+        depth_ft : float
+            Ridge length in feet.
+        wall_height_ft : float
+            Wall height in feet.
+        pitch : str
+            Roof pitch such as ``4:12``.
+        door : dict[str, Any] or None
+            Door wall, width, and height.
+        vents : list[dict[str, Any]] or None
+            Vent sizes.
+        views : list[str] or None
+            Subset of plan, front, side.
+        style : dict[str, Any] or None
+            Drawing style overrides.
+        filename : str or None
+            Optional output name.
+
+        Returns
+        -------
+        dict[str, str]
+            Absolute path of the written SVG.
+        """
+        spec = {
+            "title": title,
+            "width_ft": width_ft,
+            "depth_ft": depth_ft,
+            "wall_height_ft": wall_height_ft,
+            "pitch": pitch,
+            "door": door,
+            "vents": vents,
+            "views": views,
+            "style": style,
+            "filename": filename,
+        }
+        target = blueprint_file(spec, self.outputs or self.root)
+        return {"path": str(target)}
+
     def ask(
         self, question: str, options: list[str] | None = None
     ) -> dict[str, str]:
@@ -465,9 +734,9 @@ class ToolRegistry:
             Confined absolute path.
         """
         target = (self.root / path).resolve()
-        if target != self.root and self.root not in target.parents:
-            raise ToolError("path escapes workspace")
-        return target
+        if _inside(target, self.root) or _inside(target, self.outputs):
+            return target
+        raise ToolError("path escapes workspace")
 
     def _schema(self, name: str) -> dict[str, Any]:
         """Build one tool schema.

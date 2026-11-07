@@ -12,6 +12,7 @@ from .openrouter import OpenRouterClient, OpenRouterError
 from .pipeline import SearchPipeline
 from .progress import ProgressTUI
 from .provider import ProviderCatalog
+from .review import ReviewBlocked
 from .session import Session
 from .tui import TUI
 
@@ -372,7 +373,10 @@ def _run_prompt(agent: Agent, prompt: str) -> bool:
     if prompt.strip() == "/quit":
         return False
     if prompt.strip():
-        print(f"agent> {agent.run(prompt)}")
+        try:
+            print(f"agent> {agent.run(prompt)}")
+        except ReviewBlocked as exc:
+            print(f"agent> {exc}")
         _print_repl_suggestions(agent)
     return True
 

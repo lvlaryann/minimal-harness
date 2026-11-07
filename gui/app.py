@@ -2,11 +2,13 @@
 
 import sys
 import json
+import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
+    QDesktopServices,
     QPixmap,
     QTextBlockFormat,
     QTextCharFormat,
@@ -17,10 +19,13 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QHBoxLayout,
     QInputDialog,
     QFrame,
+    QFileDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -39,6 +44,7 @@ from meta_harness.session import Session
 
 from .store import SessionRecord, SessionStore
 from .context import snapshot
+from .outputs import human_size, list_files, session_outputs
 from .worker import AgentWorker, QuestionBridge
 
 
@@ -156,10 +162,371 @@ class PromptInput(QPlainTextEdit):
         return min(self.max_height, height)
 
 
+class AskDialog(QDialog):
+    """Ask one agent question with option buttons and a custom answer box."""
+
+    def __init__(
+        self,
+        question: str,
+        options: list[str],
+        parent: QWidget | None = None,
+    ) -> None:
+        """Build the single-question dialog.
+
+        Parameters
+        ----------
+        question : str
+            Question text for the user.
+        options : list[str]
+            Suggested answers shown as buttons.
+        parent : QWidget or None
+            Optional parent widget.
+
+        Returns
+        -------
+        None
+            The dialog is ready to show.
+        """
+        super().__init__(parent)
+        self._answer = "no answer"
+        self._custom = QLineEdit(self)
+        self._custom.setPlaceholderText("Type your own answer")
+        self.setWindowTitle("Minimal Harness")
+        self.setLayout(self._compose(question, options))
+
+    def _compose(self, question: str, options: list[str]) -> QVBoxLayout:
+        """Lay out the question, option buttons, and custom answer.
+
+        Parameters
+        ----------
+        question : str
+            Question text for the user.
+        options : list[str]
+            Suggested answers shown as buttons.
+
+        Returns
+        -------
+        QVBoxLayout
+            Arranged dialog body.
+        """
+        layout = QVBoxLayout()
+        layout.addWidget(self._question_label(question))
+        for option in options:
+            layout.addWidget(self._option_button(option))
+        self._custom.returnPressed.connect(self._send_custom)
+        layout.addWidget(self._custom)
+        layout.addLayout(self._buttons())
+        return layout
+
+    def _question_label(self, text: str) -> QLabel:
+        """Wrap one question into a label.
+
+        Parameters
+        ----------
+        text : str
+            Question text.
+
+        Returns
+        -------
+        QLabel
+            Word-wrapped label.
+        """
+        label = QLabel(text, self)
+        label.setWordWrap(True)
+        return label
+
+    def _option_button(self, option: str) -> QPushButton:
+        """Build a button that answers with one option.
+
+        Parameters
+        ----------
+        option : str
+            Suggested answer.
+
+        Returns
+        -------
+        QPushButton
+            Button bound to this option.
+        """
+        button = QPushButton(option, self)
+        button.clicked.connect(
+            lambda _=False, value=option: self._choose(value)
+        )
+        return button
+
+    def _buttons(self) -> QHBoxLayout:
+        """Build the send and cancel row.
+
+        Returns
+        -------
+        QHBoxLayout
+            Dialog action row.
+        """
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(self._action("Send", self._send_custom))
+        row.addWidget(self._action("Cancel", self.reject))
+        return row
+
+    def _action(self, label: str, slot) -> QPushButton:
+        """Build one action button.
+
+        Parameters
+        ----------
+        label : str
+            Button text.
+        slot : callable
+            Handler invoked on click.
+
+        Returns
+        -------
+        QPushButton
+            Connected button.
+        """
+        button = QPushButton(label, self)
+        button.clicked.connect(slot)
+        return button
+
+    def _choose(self, answer: str) -> None:
+        """Accept one option as the answer.
+
+        Parameters
+        ----------
+        answer : str
+            Selected option.
+
+        Returns
+        -------
+        None
+            The dialog closes with the answer.
+        """
+        self._answer = answer
+        self.accept()
+
+    def _send_custom(self) -> None:
+        """Accept the typed answer.
+
+        Returns
+        -------
+        None
+            The dialog closes with the typed text.
+        """
+        text = self._custom.text().strip()
+        self._answer = text or "no answer"
+        self.accept()
+
+    def answer(self) -> str:
+        """Return the selected answer.
+
+        Returns
+        -------
+        str
+            Chosen option or typed text.
+        """
+        return self._answer
+
+
+def _file_detail(path: Path) -> str:
+    """Describe one file by type and size.
+
+    Parameters
+    ----------
+    path : pathlib.Path
+        File to describe.
+
+    Returns
+    -------
+    str
+        Short type and size label.
+    """
+    try:
+        size = human_size(path.stat().st_size)
+    except OSError:
+        size = "missing"
+    kind = path.suffix.upper().lstrip(".") or "FILE"
+    return f"{kind} · {size}"
+
+
+class FileCard(QFrame):
+    """Show one delivered file with open, reveal, and save actions."""
+
+    def __init__(self, path: Path, parent: QWidget | None = None) -> None:
+        """Build the card for one file.
+
+        Parameters
+        ----------
+        path : pathlib.Path
+            Delivered file.
+        parent : QWidget or None
+            Optional parent widget.
+
+        Returns
+        -------
+        None
+            The card is ready to show.
+        """
+        super().__init__(parent)
+        self._path = path
+        self.setObjectName("FileCard")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 4, 8, 4)
+        row.addWidget(self._label())
+        row.addStretch(1)
+        row.addWidget(self._action("Open", self._open))
+        row.addWidget(self._action("Show in folder", self._reveal))
+        row.addWidget(self._action("Save a copy", self._save))
+
+    def _label(self) -> QWidget:
+        """Build the filename and detail block.
+
+        Returns
+        -------
+        QWidget
+            Name and size labels.
+        """
+        box = QWidget(self)
+        column = QVBoxLayout(box)
+        column.setContentsMargins(0, 0, 0, 0)
+        name = QLabel(self._path.name, box)
+        name.setToolTip(str(self._path))
+        column.addWidget(name)
+        column.addWidget(QLabel(_file_detail(self._path), box))
+        return box
+
+    def _action(self, label: str, slot) -> QPushButton:
+        """Build one action button.
+
+        Parameters
+        ----------
+        label : str
+            Button text.
+        slot : callable
+            Handler invoked on click.
+
+        Returns
+        -------
+        QPushButton
+            Connected button.
+        """
+        button = QPushButton(label, self)
+        button.clicked.connect(slot)
+        return button
+
+    def _open(self) -> None:
+        """Open the file in the default application.
+
+        Returns
+        -------
+        None
+            The desktop opens the file.
+        """
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._path)))
+
+    def _reveal(self) -> None:
+        """Open the file's folder in the file manager.
+
+        Returns
+        -------
+        None
+            The desktop opens the containing folder.
+        """
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._path.parent)))
+
+    def _save(self) -> None:
+        """Copy the file to a location the user chooses.
+
+        Returns
+        -------
+        None
+            The copy is written or an error dialog is shown.
+        """
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save a copy",
+            str(Path.home() / "Downloads" / self._path.name),
+        )
+        if not target:
+            return
+        try:
+            shutil.copy2(self._path, target)
+        except OSError as exc:
+            QMessageBox.critical(self, "Minimal Harness", str(exc))
+
+
+class FileStrip(QWidget):
+    """List the files delivered by the latest run."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Build an empty file strip.
+
+        Parameters
+        ----------
+        parent : QWidget or None
+            Optional parent widget.
+
+        Returns
+        -------
+        None
+            The strip starts hidden.
+        """
+        super().__init__(parent)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._heading = QLabel("<b>Files from this run</b>", self)
+        self._layout.addWidget(self._heading)
+        self._cards = QVBoxLayout()
+        self._layout.addLayout(self._cards)
+        self.hide()
+
+    def clear(self) -> None:
+        """Remove all cards and hide the strip.
+
+        Returns
+        -------
+        None
+            The strip is empty.
+        """
+        self._clear_cards()
+        self.hide()
+
+    def set_files(self, paths: list[Path]) -> None:
+        """Show a card for each delivered file.
+
+        Parameters
+        ----------
+        paths : list[pathlib.Path]
+            Files to show.
+
+        Returns
+        -------
+        None
+            Cards are rebuilt in order.
+        """
+        self._clear_cards()
+        for path in paths:
+            self._cards.addWidget(FileCard(path, self))
+        self.setVisible(bool(paths))
+
+    def _clear_cards(self) -> None:
+        """Delete the cards currently shown.
+
+        Returns
+        -------
+        None
+            The card layout is empty.
+        """
+        while self._cards.count():
+            item = self._cards.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+
 class ChatPanel(QWidget):
     """One agent chat panel with header, log, and input."""
 
     posted = Signal()
+    files_changed = Signal()
 
     def __init__(
         self,
@@ -195,6 +562,8 @@ class ChatPanel(QWidget):
         self._show_tools = show_tools
         self._notes_included = False
         self._last_label: str | None = None
+        self._outputs: Path | None = None
+        self._known: dict[Path, int] = {}
         self._timer = QTimer(self)
         self._timer.setInterval(250)
         self._timer.timeout.connect(self._animate)
@@ -231,6 +600,7 @@ class ChatPanel(QWidget):
         self._log.setLineWrapMode(QTextEdit.WidgetWidth)
         self._log.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._log.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._files = FileStrip(self)
         self._notes: QCheckBox | None = None
         if show_notes_toggle:
             self._notes = QCheckBox("Include saved notes", self)
@@ -242,6 +612,7 @@ class ChatPanel(QWidget):
         row.addWidget(self._input)
         row.addWidget(self._send)
         self._layout.addWidget(self._log)
+        self._layout.addWidget(self._files)
         if self._notes is not None:
             self._layout.addWidget(self._notes)
         self._layout.addLayout(row)
@@ -341,22 +712,30 @@ class ChatPanel(QWidget):
         self._input.clear()
         if self._context is not None:
             prompt = self._context() + "\n\n" + prompt
+        self._known = self._snapshot()
+        self._files.clear()
         self._worker.prompt_ready.emit(prompt)
         self.posted.emit()
 
-    def switch_session(self, session: Session) -> None:
+    def switch_session(self, session: Session, outputs=None) -> None:
         """Point the panel agent at a new session.
 
         Parameters
         ----------
         session : Session
             Session to make active.
+        outputs : pathlib.Path or str or None
+            Output folder for delivered files.
 
         Returns
         -------
         None
             The session is bound and the log reloaded.
         """
+        self._agent.set_outputs(outputs)
+        self._outputs = self._agent.outputs
+        self._known = self._snapshot()
+        self._files.clear()
         self._agent.session = session
         self._agent.messages = self._agent._initial_messages(session)
         self._log.clear()
@@ -379,6 +758,8 @@ class ChatPanel(QWidget):
         """
         role = message.get("role")
         content = message.get("content")
+        if message.get("hidden"):
+            return
         if role in ("user", "assistant") and isinstance(content, str):
             self._append_log("you" if role == "user" else "agent", content)
         elif role == "tool" and self._show_tools and isinstance(content, str):
@@ -534,6 +915,52 @@ class ChatPanel(QWidget):
         """
         self._stop_thinking()
         self._append_log("agent", answer)
+        self._mark_reviewed()
+        changed = self._changed_files()
+        if changed:
+            self._files.set_files(changed)
+        self.files_changed.emit()
+
+    def _mark_reviewed(self) -> None:
+        """Show that the reply passed review.
+
+        Returns
+        -------
+        None
+            The status label reflects the verdict.
+        """
+        review = getattr(self._agent, "last_review", None)
+        if review and review.get("passed"):
+            self._status.setText("reviewed")
+
+    def _snapshot(self) -> dict[Path, int]:
+        """Return output file timestamps for change detection.
+
+        Returns
+        -------
+        dict[pathlib.Path, int]
+            Files mapped to their modification time.
+        """
+        return {
+            path: path.stat().st_mtime_ns for path in list_files(self._outputs)
+        }
+
+    def _changed_files(self) -> list[Path]:
+        """Return files created or changed since the last snapshot.
+
+        Returns
+        -------
+        list[pathlib.Path]
+            Newest changed files first.
+        """
+        current = self._snapshot()
+        changed = [
+            path
+            for path, stamp in current.items()
+            if self._known.get(path) != stamp
+        ]
+        self._known = current
+        return changed
 
     def on_tool(self, name: str, arguments: dict, content: str) -> None:
         """Show tool activity when enabled.
@@ -613,12 +1040,11 @@ class ChatPanel(QWidget):
             The bridge resolves with the user's choice.
         """
         self._pending = bridge
-        choice, ok = QInputDialog.getItem(
-            self, "Minimal Harness", question, options, 0, True
-        )
-        if not ok or not choice:
-            choice = "no answer"
-        self._worker.resolve(bridge, choice)
+        dialog = AskDialog(question, options, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._worker.resolve(bridge, "no answer")
+            return
+        self._worker.resolve(bridge, dialog.answer())
 
     def stop(self) -> None:
         """Stop the panel worker thread.
@@ -659,10 +1085,12 @@ class MainWindow(QMainWindow):
         self._store = store
         self._root = root
         self._record: SessionRecord | None = None
+        self._outputs: Path | None = None
         self._command_panel = ChatPanel(
             self._make_agent(), show_tools=self._settings.get("show_tools")
         )
         self._command_panel.posted.connect(self._on_posted)
+        self._command_panel.files_changed.connect(self._refresh_files)
         ideas_context = self._make_ideas_context
         self._ideas_panel = ChatPanel(
             self._make_agent(),
@@ -672,6 +1100,7 @@ class MainWindow(QMainWindow):
             show_tools=self._settings.get("show_tools"),
         )
         self._ideas_panel.posted.connect(self._on_posted)
+        self._ideas_panel.files_changed.connect(self._refresh_files)
         self._ideas_card = self._card(self._ideas_panel)
         self._ideas_card.hide()
         central = QWidget(self)
@@ -822,6 +1251,14 @@ class MainWindow(QMainWindow):
         self._new_build_button = QPushButton("+ New Build", sidebar)
         self._new_build_button.clicked.connect(self._new_build)
         box.addWidget(self._new_build_button)
+        box.addSpacing(12)
+        self._files_heading = QLabel("<b>Files</b>", sidebar)
+        box.addWidget(self._files_heading)
+        self._files_list = QListWidget(sidebar)
+        self._files_list.itemDoubleClicked.connect(self._file_open)
+        self._files_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._files_list.customContextMenuRequested.connect(self._file_menu)
+        box.addWidget(self._files_list)
         return sidebar
 
     def _refresh_sidebar(self) -> None:
@@ -838,6 +1275,127 @@ class MainWindow(QMainWindow):
         self._build_list.clear()
         for record in self._store.list(kind="build"):
             self._build_list.addItem(self._item(record))
+
+    def _refresh_files(self) -> None:
+        """Repopulate the delivered-files list.
+
+        Returns
+        -------
+        None
+            The list reflects the active output folder.
+        """
+        self._files_list.clear()
+        for path in list_files(self._outputs):
+            item = QListWidgetItem(path.name)
+            item.setData(Qt.UserRole, str(path))
+            item.setToolTip(str(path))
+            self._files_list.addItem(item)
+
+    def _file_open(self, item: QListWidgetItem) -> None:
+        """Open the selected delivered file.
+
+        Parameters
+        ----------
+        item : QListWidgetItem
+            Row carrying the file path.
+
+        Returns
+        -------
+        None
+            The default application opens the file.
+        """
+        path = Path(item.data(Qt.UserRole))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _file_menu(self, pos) -> None:
+        """Open the context menu for a delivered file.
+
+        Parameters
+        ----------
+        pos : QPoint
+            Menu request position.
+
+        Returns
+        -------
+        None
+            The menu is shown for the row.
+        """
+        item = self._files_list.itemAt(pos)
+        if item is None:
+            return
+        path = Path(item.data(Qt.UserRole))
+        self._show_file_menu(path, self._files_list.mapToGlobal(pos))
+
+    def _show_file_menu(self, path: Path, point) -> None:
+        """Show open, reveal, and save actions for one file.
+
+        Parameters
+        ----------
+        path : pathlib.Path
+            Delivered file.
+        point : QPoint
+            Global menu position.
+
+        Returns
+        -------
+        None
+            The chosen action runs.
+        """
+        menu = QMenu(self)
+        actions = {
+            menu.addAction("Open"): "open",
+            menu.addAction("Show in folder"): "reveal",
+            menu.addAction("Save a copy"): "save",
+        }
+        chosen = menu.exec(point)
+        self._run_file_action(actions.get(chosen), path)
+
+    def _run_file_action(self, action: str | None, path: Path) -> None:
+        """Run one delivered-file action.
+
+        Parameters
+        ----------
+        action : str or None
+            Action name or None when the menu was dismissed.
+        path : pathlib.Path
+            Delivered file.
+
+        Returns
+        -------
+        None
+            The action runs.
+        """
+        if action == "open":
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        elif action == "reveal":
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        elif action == "save":
+            self._save_copy(path)
+
+    def _save_copy(self, path: Path) -> None:
+        """Copy a delivered file to a chosen location.
+
+        Parameters
+        ----------
+        path : pathlib.Path
+            Delivered file.
+
+        Returns
+        -------
+        None
+            The copy is written or an error dialog is shown.
+        """
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save a copy",
+            str(Path.home() / "Downloads" / path.name),
+        )
+        if not target:
+            return
+        try:
+            shutil.copy2(path, target)
+        except OSError as exc:
+            QMessageBox.critical(self, "Minimal Harness", str(exc))
 
     def _menu_session(self, pos) -> None:
         """Open the context menu for a session row.
@@ -1030,9 +1588,11 @@ class MainWindow(QMainWindow):
         self._touch_active()
         transcripts = Session(record.transcript)
         notes = Session(record.notes)
-        self._command_panel.switch_session(transcripts)
-        self._ideas_panel.switch_session(notes)
+        self._outputs = session_outputs(record.session_id)
+        self._command_panel.switch_session(transcripts, self._outputs)
+        self._ideas_panel.switch_session(notes, self._outputs)
         self._mark_active(record)
+        self._refresh_files()
 
     def _mark_active(self, record: SessionRecord) -> None:
         """Highlight the active row in its list.

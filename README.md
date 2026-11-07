@@ -48,6 +48,16 @@ Per-platform notes:
 - **macOS:** `python3` ships with the OS but can be older than 3.11. For this project, install a current 3.x from [python.org](https://python.org) or via Homebrew and build the venv with that interpreter.
 - **Linux:** if you created the venv outside a distro-managed `python3`, install `python3-venv` (Debian/Ubuntu) or your distro's equivalent. The TUI needs a real terminal, and the GUI needs an X11 or Wayland session.
 
+## Answer Review
+
+Interactive replies are not delivered raw. Every final draft passes through three checks:
+
+1. A deterministic file gate. HTML must be a complete document, SVG must parse, PDFs must have a valid header, and empty files are rejected.
+2. An adversarial reviewer that sees the request, the draft, the tool calls, and excerpts of the files. It returns concrete blockers and fixes.
+3. An adjudicator that confirms the reviewed draft before delivery.
+
+If blockers remain after two revision passes, delivery stops, the blockers are shown, and any new files are moved to `.review-blocked` in the output folder. Every verdict is appended to `reviews.jsonl` in the session folder. This gate costs extra model calls per reply, and it is separate from the code-benchmark reviewer used by `--optimize`.
+
 ## What The Paper Says
 
 The paper describes a system that “repeatedly proposes, evaluates, and logs new harnesses.” Its central engineering decision is to let an agent inspect a filesystem containing prior candidate source code, evaluation scores, and raw execution traces.

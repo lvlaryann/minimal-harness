@@ -298,7 +298,31 @@ class OpenRouterClient:
         """
         if isinstance(exc, TimeoutError):
             return OpenRouterError("OpenRouter request exceeded 120 seconds.")
+        if isinstance(exc, urllib.error.HTTPError):
+            body = self._error_body(exc)
+            return OpenRouterError(
+                f"OpenRouter request failed: HTTP {exc.code} {body}"
+            )
         return OpenRouterError(f"OpenRouter request failed: {exc}")
+
+    def _error_body(self, error: urllib.error.HTTPError) -> str:
+        """Return a readable body from an HTTP failure.
+
+        Parameters
+        ----------
+        error : urllib.error.HTTPError
+            Provider HTTP error.
+
+        Returns
+        -------
+        str
+            Response body, trimmed for display.
+        """
+        try:
+            text = error.read().decode("utf-8", "replace")
+        except (OSError, ValueError):
+            return error.reason or "request failed"
+        return text.strip()[:500]
 
     def _send_body(self, request: urllib.request.Request) -> dict[str, Any]:
         """Send a request through the retry wrapper.

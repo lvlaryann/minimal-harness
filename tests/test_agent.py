@@ -99,6 +99,99 @@ class AgentTests(unittest.TestCase):
             ["Find local experts", "Find local class"],
         )
 
+    def test_ask_schema_states_one_question(self) -> None:
+        """The advertised ask tool describes a single question.
+
+        Returns
+        -------
+        None
+            Assertions pass when the description is explicit.
+        """
+        registry = ToolRegistry(".", questioner=lambda q, opts: "")
+        ask = next(
+            item
+            for item in registry.schema()
+            if item["function"]["name"] == "ask"
+        )
+        self.assertIn("one question", ask["function"]["description"])
+
+    def test_bundled_questions_are_redirected_to_ask_tool(self) -> None:
+        """Bundled prose questions trigger one corrective ask turn.
+
+        Returns
+        -------
+        None
+            Assertions pass when the questioner sees one question.
+        """
+        client = BundledQuestionClient()
+        agent = Agent(".", client=client)
+        asked = []
+        agent.tools.questioner = lambda q, o: asked.append((q, o)) or "8x10"
+        answer = agent.run("Build a greenhouse")
+        self.assertEqual(answer, "Plan ready")
+        self.assertEqual(asked, [("Which size?", ["8x10", "12x20"])])
+        self.assertEqual(client.calls, 3)
+
+    def test_malformed_tool_arguments_are_repaired(self) -> None:
+        """Truncated tool arguments do not poison later requests.
+
+        Returns
+        -------
+        None
+            Assertions pass when invalid arguments become an empty object.
+        """
+        client = MalformedToolClient()
+        answer = Agent(".", client=client).run("Write a plan")
+        assistant = next(
+            item for item in client.last_messages if item.get("tool_calls")
+        )
+        self.assertEqual(answer, "Recovered")
+        self.assertEqual(
+            assistant["tool_calls"][0]["function"]["arguments"], "{}"
+        )
+
+    def test_outputs_folder_accepts_delivered_files(self) -> None:
+        """The outputs folder is writable without widening the workspace.
+
+        Returns
+        -------
+        None
+            Assertions pass when delivery writes succeed.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            outputs = Path(directory, "out")
+            outputs.mkdir()
+            registry = ToolRegistry(directory, outputs=outputs)
+            registry.write(str(outputs / "plan.txt"), "hello")
+            self.assertEqual(Path(outputs, "plan.txt").read_text(), "hello")
+
+    def test_make_pdf_writes_into_outputs(self) -> None:
+        """The PDF tool saves under the output folder.
+
+        Returns
+        -------
+        None
+            Assertions pass when the PDF file exists.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            outputs = Path(directory, "out")
+            registry = ToolRegistry(directory, outputs=outputs)
+            result = registry.make_pdf("plan.pdf", "Plan", "Hello")
+            self.assertTrue(Path(result["path"]).exists())
+
+    def test_agent_prompt_names_output_folder(self) -> None:
+        """The system prompt tells the agent where to save deliverables.
+
+        Returns
+        -------
+        None
+            Assertions pass when the folder path is present.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            agent = Agent(".", client=ToolCallClient(), outputs=directory)
+            prompt = agent.messages[0]["content"]
+            self.assertIn(str(Path(directory).resolve()), prompt)
+
     def _names(self, registry: ToolRegistry) -> list[str]:
         """Return advertised tool names.
 
@@ -227,6 +320,127 @@ class ToolCallClient:
         call = {
             "id": "call-1",
             "function": {"name": "write", "arguments": arguments},
+        }
+        return {"role": "assistant", "content": None, "tool_calls": [call]}
+
+
+class BundledQuestionClient:
+    """Return bundled prose, then one ask call, then final text."""
+
+    def __init__(self) -> None:
+        """Initialize the call counter.
+
+        Returns
+        -------
+        None
+            This initializer configures the fake client.
+        """
+        self.calls = 0
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a deterministic question sequence.
+
+        Parameters
+        ----------
+        messages : list[dict]
+            Conversation messages.
+        tools : list[dict]
+            Advertised tool schemas.
+
+        Returns
+        -------
+        dict
+            OpenAI-compatible response body.
+        """
+        self.calls += 1
+        return {"choices": [{"message": self._message()}]}
+
+    def _message(self) -> dict:
+        """Build the message for the current call.
+
+        Returns
+        -------
+        dict
+            Assistant message.
+        """
+        if self.calls == 1:
+            return {"role": "assistant", "content": "Which size? Budget?"}
+        if self.calls == 2:
+            return self._ask_message()
+        return {"role": "assistant", "content": "Plan ready"}
+
+    def _ask_message(self) -> dict:
+        """Build a single ask tool call.
+
+        Returns
+        -------
+        dict
+            Assistant message with one ask call.
+        """
+        arguments = '{"question": "Which size?", "options": ["8x10", "12x20"]}'
+        call = {
+            "id": "call-1",
+            "function": {"name": "ask", "arguments": arguments},
+        }
+        return {"role": "assistant", "content": None, "tool_calls": [call]}
+
+
+class MalformedToolClient:
+    """Return one truncated tool call followed by final text."""
+
+    def __init__(self) -> None:
+        """Initialize the call counter.
+
+        Returns
+        -------
+        None
+            This initializer configures the fake client.
+        """
+        self.calls = 0
+        self.last_messages: list[dict] = []
+
+    def chat(self, messages: list[dict], tools: list[dict]) -> dict:
+        """Return a deterministic malformed-then-fixed sequence.
+
+        Parameters
+        ----------
+        messages : list[dict]
+            Conversation messages.
+        tools : list[dict]
+            Advertised tool schemas.
+
+        Returns
+        -------
+        dict
+            OpenAI-compatible response body.
+        """
+        self.calls += 1
+        self.last_messages = messages
+        return {"choices": [{"message": self._message()}]}
+
+    def _message(self) -> dict:
+        """Build the message for the current call.
+
+        Returns
+        -------
+        dict
+            Assistant message.
+        """
+        if self.calls == 1:
+            return self._broken_message()
+        return {"role": "assistant", "content": "Recovered"}
+
+    def _broken_message(self) -> dict:
+        """Build a truncated write tool call.
+
+        Returns
+        -------
+        dict
+            Assistant message with invalid argument JSON.
+        """
+        call = {
+            "id": "call-1",
+            "function": {"name": "write", "arguments": '{"path": "x"'},
         }
         return {"role": "assistant", "content": None, "tool_calls": [call]}
 
